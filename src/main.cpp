@@ -32,11 +32,7 @@
 //  Debug serial
 //----------------------------------------------------------------------------------------
 
-// #define RXD1 13       // (only for USB connection)
-// #define TXD1 14       // (only for USB connection)
-
 #define debug Serial // (only for TCP connection)
-// #define debug Serial1 // (only for USB connection)
 
 //----------------------------------------------------------------------------------------
 //  CAN Desired Bit Rate
