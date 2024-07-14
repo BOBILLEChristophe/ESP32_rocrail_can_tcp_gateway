@@ -6,7 +6,7 @@
 */
 
 #define PROJECT "rocrail_can_tcp_gateway"
-#define VERSION "1.0"
+#define VERSION "1.0.1"
 #define AUTHOR "Christophe BOBILLE - www.locoduino.org"
 
 //----------------------------------------------------------------------------------------
@@ -57,8 +57,8 @@ uint16_t rrHash; // for Rocrail hash
 //  TCP/WIFI-ETHERNET
 //----------------------------------------------------------------------------------------
 
-const char *ssid = "*************";
-const char *password = "*************";
+const char *ssid = "**********";
+const char *password = "**********";
 const uint port = 15731;
 WiFiServer server(port);
 WiFiClient client;
@@ -106,6 +106,8 @@ void setup()
   //--- Configure ESP32 CAN
   debug.println("Configure ESP32 CAN");
   ACAN_ESP32_Settings settings(DESIRED_BIT_RATE);
+  settings.mDriverReceiveBufferSize = 50;
+  settings.mDriverTransmitBufferSize = 50;
   settings.mRxPin = GPIO_NUM_22; // Optional, default Tx pin is GPIO_NUM_4
   settings.mTxPin = GPIO_NUM_23; // Optional, default Rx pin is GPIO_NUM_5
   const uint32_t errorCode = ACAN_ESP32::can.begin(settings);
@@ -157,20 +159,35 @@ void setup()
     frame.len = cBuffer[4];
     for (byte i = 0; i < frame.len; i++)
       frame.data[i] = cBuffer[i + 5];
-    const uint32_t ok = ACAN_ESP32::can.tryToSend(frame);
 
-    debugFrame(&frame);
+    uint32_t ok = false;
+    uint8_t compt = 0;
+    while (!ok && compt < 5)
+    {
+      ok = ACAN_ESP32::can.tryToSend(frame);
+      compt++;
+    }
+    if (ok && compt < 5)
+      debugFrame(&frame);
+    else
+    {
+      debug.println("CAN frame failed to send.");
+      debug.println("ESP32 will restart in 10 seconds.");
+      debug.println("Relaunch Rocrail.");
+      delay(10);
+      esp_restart;
+    }
   }
 
   // Create queues
-  canToTcpQueue = xQueueCreate(10, sizeof(CANMessage));
-  tcpToCanQueue = xQueueCreate(10, 13 * sizeof(byte));
+  canToTcpQueue = xQueueCreate(50, sizeof(CANMessage));
+  tcpToCanQueue = xQueueCreate(50, 13 * sizeof(byte));
 
   // Create tasks
-  xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 2 * 1024, NULL, 3, NULL, 0);
-  xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 2 * 1024, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 2 * 1024, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 2 * 1024, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 2 * 1024, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 2 * 1024, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 2 * 1024, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 2 * 1024, NULL, 3, NULL, 0);
 } // end setup
 
 //----------------------------------------------------------------------------------------
