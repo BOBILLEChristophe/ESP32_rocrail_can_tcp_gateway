@@ -6,7 +6,7 @@
 */
 
 #define PROJECT "rocrail_can_tcp_gateway"
-#define VERSION "1.0.1"
+#define VERSION "1.0.5"
 #define AUTHOR "Christophe BOBILLE - www.locoduino.org"
 
 //----------------------------------------------------------------------------------------
@@ -57,8 +57,11 @@ uint16_t rrHash; // for Rocrail hash
 //  TCP/WIFI-ETHERNET
 //----------------------------------------------------------------------------------------
 
-const char *ssid = "**********";
-const char *password = "**********";
+const char *ssid = "Livebox-BC90";
+const char *password = "V9b7qzKFxdQfbMT4Pa";
+
+// const char *ssid = "**********";
+// const char *password = "**********";
 const uint port = 15731;
 WiFiServer server(port);
 WiFiClient client;
@@ -69,6 +72,7 @@ WiFiClient client;
 
 QueueHandle_t canToTcpQueue;
 QueueHandle_t tcpToCanQueue;
+QueueHandle_t debugQueue; // Queue for debug messages
 
 //----------------------------------------------------------------------------------------
 //  Debug declaration
@@ -84,6 +88,7 @@ void CANReceiveTask(void *pvParameters);
 void TCPSendTask(void *pvParameters);
 void TCPReceiveTask(void *pvParameters);
 void CANSendTask(void *pvParameters);
+void debugFrameTask(void *pvParameters); // Debug task
 
 //----------------------------------------------------------------------------------------
 //   SETUP
@@ -136,6 +141,20 @@ void setup()
 
   server.begin();
 
+  // Create queues
+  canToTcpQueue = xQueueCreate(50, sizeof(CANMessage));
+  tcpToCanQueue = xQueueCreate(50, 13 * sizeof(byte));
+  debugQueue = xQueueCreate(50, sizeof(CANMessage)); // Create debug queue
+
+  // Create tasks
+  xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 2 * 1024, NULL, 3, NULL, 0); // priority 3
+  xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 2 * 1024, NULL, 5, NULL, 1);       // priority 5
+  xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 2 * 1024, NULL, 3, NULL, 1); // priority 3
+  xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 2 * 1024, NULL, 5, NULL, 0);       // priority 5
+  xTaskCreatePinnedToCore(debugFrameTask, "debugFrameTask", 2 * 1024, NULL, 1, NULL, 1); // debug task with priority 1 on core 1
+
+  debug.printf("\n\nWaiting for connection from Rocrail.\n");
+
   while (!client) // listen for incoming clients
     client = server.available();
 
@@ -160,34 +179,9 @@ void setup()
     for (byte i = 0; i < frame.len; i++)
       frame.data[i] = cBuffer[i + 5];
 
-    uint32_t ok = false;
-    uint8_t compt = 0;
-    while (!ok && compt < 5)
-    {
-      ok = ACAN_ESP32::can.tryToSend(frame);
-      compt++;
-    }
-    if (ok && compt < 5)
-      debugFrame(&frame);
-    else
-    {
-      debug.println("CAN frame failed to send.");
-      debug.println("ESP32 will restart in 10 seconds.");
-      debug.println("Relaunch Rocrail.");
-      delay(10);
-      esp_restart;
-    }
+    bool ok = ACAN_ESP32::can.tryToSend(frame);
   }
 
-  // Create queues
-  canToTcpQueue = xQueueCreate(50, sizeof(CANMessage));
-  tcpToCanQueue = xQueueCreate(50, 13 * sizeof(byte));
-
-  // Create tasks
-  xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 2 * 1024, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 2 * 1024, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 2 * 1024, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 2 * 1024, NULL, 3, NULL, 0);
 } // end setup
 
 //----------------------------------------------------------------------------------------
@@ -208,7 +202,10 @@ void CANReceiveTask(void *pvParameters)
   while (true)
   {
     if (ACAN_ESP32::can.receive(frameIn))
+    {
       xQueueSend(canToTcpQueue, &frameIn, portMAX_DELAY);
+      xQueueSend(debugQueue, &frameIn, portMAX_DELAY); // send to debug queue
+    }
     vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
   }
 }
@@ -227,8 +224,8 @@ void TCPSendTask(void *pvParameters)
       // clear sBuffer
       memset(sBuffer, 0, sizeof(sBuffer));
 
-      debug.printf("CAN -> TCP\n\n");
-      debugFrame(&frameIn);
+      // debug.printf("CAN -> TCP\n\n");
+      xQueueSend(debugQueue, &frameIn, 10); // send to debug queue
 
       sBuffer[0] = (frameIn.id & 0xFF000000) >> 24;
       sBuffer[1] = (frameIn.id & 0xFF0000) >> 16;
@@ -240,7 +237,7 @@ void TCPSendTask(void *pvParameters)
 
       client.write(sBuffer, 13);
     }
-    vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
+    // vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
   }
 }
 
@@ -257,7 +254,7 @@ void TCPReceiveTask(void *pvParameters)
       if (client.readBytes(cBuffer, 13) == 13)
       {
         xQueueSend(tcpToCanQueue, cBuffer, portMAX_DELAY);
-        debug.printf("TCP -> CAN\n\n");
+        // debug.printf("TCP -> CAN\n\n");
       }
     }
     vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
@@ -282,10 +279,27 @@ void CANSendTask(void *pvParameters)
       for (byte i = 0; i < frameOut.len; i++)
         frameOut.data[i] = buffer[i + 5];
 
-      debugFrame(&frameOut);
       const bool ok = ACAN_ESP32::can.tryToSend(frameOut);
+      xQueueSend(debugQueue, &frameOut, portMAX_DELAY); // send to debug queue
     }
-    vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
+    // vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//   debugFrameTask
+//----------------------------------------------------------------------------------------
+
+void debugFrameTask(void *pvParameters)
+{
+  CANMessage frame;
+  while (true)
+  {
+    if (xQueueReceive(debugQueue, &frame, portMAX_DELAY))
+    {
+      debugFrame(&frame);
+    }
+    // vTaskDelay(10 * portTICK_PERIOD_MS); // Avoid busy-waiting
   }
 }
 
@@ -295,8 +309,13 @@ void CANSendTask(void *pvParameters)
 
 void debugFrame(const CANMessage *frame)
 {
+  uint16_t hash = frame->id & 0xFFFF;
+  if (frame->id & 0xFFFF == rrHash)
+    Serial.println("TCP -> CAN");
+  else
+    Serial.println("CAN -> TCP");
   debug.print("Hash : 0x");
-  debug.println(frame->id & 0xFFFF, HEX);
+  debug.println(hash, HEX);
   debug.print("Response : ");
   debug.println((frame->id & 0x10000) >> 16 ? "true" : "false");
   debug.print("Commande : 0x");
