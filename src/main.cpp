@@ -120,8 +120,7 @@ void setup()
     debug.println(errorCode, HEX);
   }
   else
-    debug.println("Configuration CAN OK");
-  debug.println("");
+    debug.print("Configuration CAN OK\n\n");
 
   WiFi.begin(ssid, password);
 
@@ -169,6 +168,10 @@ void setup()
     debug.println(rrHash, HEX);
 
     // --- register Rocrail on the CAN bus
+    constexpr uint8_t MAX_RETRIES = 5;
+    constexpr uint16_t RESTART_DELAY_MS = 10000;
+    constexpr uint8_t CAN_FRAME_BASE_INDEX = 5;
+
     CANMessage frame;
     frame.id = (cBuffer[0] << 24) | (cBuffer[1] << 16) | rrHash;
     frame.ext = true;
@@ -176,24 +179,24 @@ void setup()
     for (byte i = 0; i < frame.len; i++)
       frame.data[i] = cBuffer[i + 5];
 
+    // uint32_t ok = false;
+    bool isSent = false;
+    uint8_t attempts = 0;
 
-      uint32_t ok = false;
-    uint8_t compt = 0;
-    while (!ok && compt < 5)
+    while (!isSent && attempts < MAX_RETRIES)
     {
-      ok = ACAN_ESP32::can.tryToSend(frame);
-      compt++;
+      isSent = ACAN_ESP32::can.tryToSend(frame);
+      ++attempts;
       delay(1);
     }
-    if (ok && compt < 5)
-      debugFrame(&frame);
-    else
-    {
-      debug.println("CAN frame failed to send.");
-      debug.println("ESP32 will restart in 10 seconds.");
-      debug.println("/!\\Relaunch Rocrail.");
-      delay(10000);
-      ESP.restart();
+    if (isSent) {
+        debugFrame(&frame);
+    } else {
+        debug.println("CAN frame failed to send.");
+        debug.println("ESP32 will restart in 10 seconds.");
+        debug.println("/!\\ Relaunch Rocrail.");
+        delay(RESTART_DELAY_MS);
+        ESP.restart();
     }
   }
 
@@ -289,8 +292,6 @@ void CANSendTask(void *pvParameters)
       frameOut.len = buffer[4];
       for (byte i = 0; i < frameOut.len; i++)
         frameOut.data[i] = buffer[i + 5];
-
-
 
       const bool ok = ACAN_ESP32::can.tryToSend(frameOut);
       xQueueSend(debugQueue, &frameOut, 10); // send to debug queue
