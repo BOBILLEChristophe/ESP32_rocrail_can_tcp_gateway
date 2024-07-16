@@ -6,7 +6,7 @@
 */
 
 #define PROJECT "rocrail_can_tcp_gateway"
-#define VERSION "1.0.5"
+#define VERSION "1.0.6"
 #define AUTHOR "Christophe BOBILLE - www.locoduino.org"
 
 //----------------------------------------------------------------------------------------
@@ -57,11 +57,8 @@ uint16_t rrHash; // for Rocrail hash
 //  TCP/WIFI-ETHERNET
 //----------------------------------------------------------------------------------------
 
-const char *ssid = "Livebox-BC90";
-const char *password = "V9b7qzKFxdQfbMT4Pa";
-
-// const char *ssid = "**********";
-// const char *password = "**********";
+const char *ssid = "**********";
+const char *password = "**********";
 const uint port = 15731;
 WiFiServer server(port);
 WiFiClient client;
@@ -131,13 +128,13 @@ void setup()
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
-    Serial.print(".");
+    debug.print(".");
   }
 
-  Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+  debug.println("");
+  debug.println("WiFi connected.");
+  debug.println("IP address: ");
+  debug.println(WiFi.localIP());
 
   server.begin();
 
@@ -179,7 +176,25 @@ void setup()
     for (byte i = 0; i < frame.len; i++)
       frame.data[i] = cBuffer[i + 5];
 
-    bool ok = ACAN_ESP32::can.tryToSend(frame);
+
+      uint32_t ok = false;
+    uint8_t compt = 0;
+    while (!ok && compt < 5)
+    {
+      ok = ACAN_ESP32::can.tryToSend(frame);
+      compt++;
+      delay(1);
+    }
+    if (ok && compt < 5)
+      debugFrame(&frame);
+    else
+    {
+      debug.println("CAN frame failed to send.");
+      debug.println("ESP32 will restart in 10 seconds.");
+      debug.println("/!\\Relaunch Rocrail.");
+      delay(10000);
+      ESP.restart();
+    }
   }
 
 } // end setup
@@ -204,7 +219,7 @@ void CANReceiveTask(void *pvParameters)
     if (ACAN_ESP32::can.receive(frameIn))
     {
       xQueueSend(canToTcpQueue, &frameIn, portMAX_DELAY);
-      xQueueSend(debugQueue, &frameIn, portMAX_DELAY); // send to debug queue
+      xQueueSend(debugQueue, &frameIn, 10); // send to debug queue
     }
     vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
   }
@@ -237,7 +252,6 @@ void TCPSendTask(void *pvParameters)
 
       client.write(sBuffer, 13);
     }
-    // vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
   }
 }
 
@@ -252,10 +266,7 @@ void TCPReceiveTask(void *pvParameters)
     if (client.connected() && client.available())
     {
       if (client.readBytes(cBuffer, 13) == 13)
-      {
-        xQueueSend(tcpToCanQueue, cBuffer, portMAX_DELAY);
-        // debug.printf("TCP -> CAN\n\n");
-      }
+        xQueueSend(tcpToCanQueue, cBuffer, 10);
     }
     vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
   }
@@ -279,10 +290,11 @@ void CANSendTask(void *pvParameters)
       for (byte i = 0; i < frameOut.len; i++)
         frameOut.data[i] = buffer[i + 5];
 
+
+
       const bool ok = ACAN_ESP32::can.tryToSend(frameOut);
-      xQueueSend(debugQueue, &frameOut, portMAX_DELAY); // send to debug queue
+      xQueueSend(debugQueue, &frameOut, 10); // send to debug queue
     }
-    // vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
   }
 }
 
@@ -299,7 +311,6 @@ void debugFrameTask(void *pvParameters)
     {
       debugFrame(&frame);
     }
-    // vTaskDelay(10 * portTICK_PERIOD_MS); // Avoid busy-waiting
   }
 }
 
