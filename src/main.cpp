@@ -6,7 +6,7 @@
 */
 
 #define PROJECT "rocrail_can_tcp_gateway"
-#define VERSION "1.0.6"
+#define VERSION "1.0.8"
 #define AUTHOR "Christophe BOBILLE - www.locoduino.org"
 
 //----------------------------------------------------------------------------------------
@@ -44,8 +44,9 @@ static const uint32_t DESIRED_BIT_RATE = 250UL * 1000UL; // Marklin CAN baudrate
 //  Buffers  : Rocrail always send 13 bytes
 //----------------------------------------------------------------------------------------
 
-byte cBuffer[13]; // CAN buffer
-byte sBuffer[13]; // Serial buffer
+static const uint8_t BUFFER_SIZE = 13;
+byte cBuffer[BUFFER_SIZE]; // CAN buffer
+byte sBuffer[BUFFER_SIZE]; // Serial buffer
 
 //----------------------------------------------------------------------------------------
 //  Marklin hash
@@ -124,6 +125,8 @@ void setup()
 
   WiFi.begin(ssid, password);
 
+  debug.print("Waiting for WiFi connection : \n\n");
+
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
@@ -132,22 +135,10 @@ void setup()
 
   debug.println("");
   debug.println("WiFi connected.");
-  debug.println("IP address: ");
+  debug.print("IP address : ");
   debug.println(WiFi.localIP());
 
   server.begin();
-
-  // Create queues
-  canToTcpQueue = xQueueCreate(50, sizeof(CANMessage));
-  tcpToCanQueue = xQueueCreate(50, 13 * sizeof(byte));
-  debugQueue = xQueueCreate(50, sizeof(CANMessage)); // Create debug queue
-
-  // Create tasks
-  xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 2 * 1024, NULL, 3, NULL, 0); // priority 3
-  xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 2 * 1024, NULL, 5, NULL, 1);       // priority 5
-  xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 2 * 1024, NULL, 3, NULL, 1); // priority 3
-  xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 2 * 1024, NULL, 5, NULL, 0);       // priority 5
-  xTaskCreatePinnedToCore(debugFrameTask, "debugFrameTask", 2 * 1024, NULL, 1, NULL, 1); // debug task with priority 1 on core 1
 
   debug.printf("\n\nWaiting for connection from Rocrail.\n");
 
@@ -159,10 +150,10 @@ void setup()
   if (client.connected())
   {                 // loop while the client's connected
     int16_t rb = 0; //!\ Do not change type int16_t See https://www.arduino.cc/reference/en/language/functions/communication/stream/streamreadbytes/
-    while (rb != 13)
+    while (rb != BUFFER_SIZE)
     {
       if (client.available()) // if there's bytes to read from the client,
-        rb = client.readBytes(cBuffer, 13);
+        rb = client.readBytes(cBuffer, BUFFER_SIZE);
     }
     rrHash = ((cBuffer[2] << 8) | cBuffer[3]);
     debug.println(rrHash, HEX);
@@ -170,7 +161,6 @@ void setup()
     // --- register Rocrail on the CAN bus
     constexpr uint8_t MAX_RETRIES = 5;
     constexpr uint16_t RESTART_DELAY_MS = 10000;
-    constexpr uint8_t CAN_FRAME_BASE_INDEX = 5;
 
     CANMessage frame;
     frame.id = (cBuffer[0] << 24) | (cBuffer[1] << 16) | rrHash;
@@ -187,17 +177,32 @@ void setup()
     {
       isSent = ACAN_ESP32::can.tryToSend(frame);
       ++attempts;
-      delay(1);
+      delay(100);
     }
-    if (isSent) {
-        debugFrame(&frame);
-    } else {
-        debug.println("CAN frame failed to send.");
-        debug.println("ESP32 will restart in 10 seconds.");
-        debug.println("/!\\ Relaunch Rocrail.");
-        delay(RESTART_DELAY_MS);
-        ESP.restart();
+    if (isSent)
+    {
+      debugFrame(&frame);
     }
+    else
+    {
+      debug.println("CAN frame failed to send.");
+      debug.println("ESP32 will restart in 10 seconds.");
+      debug.println("/!\\ Relaunch Rocrail.");
+      delay(RESTART_DELAY_MS);
+      ESP.restart();
+    }
+
+    // Create queues
+    canToTcpQueue = xQueueCreate(50, sizeof(CANMessage));
+    tcpToCanQueue = xQueueCreate(50, BUFFER_SIZE * sizeof(byte));
+    debugQueue = xQueueCreate(50, sizeof(CANMessage)); // Create debug queue
+
+    // Create tasks
+    xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 2 * 1024, NULL, 3, NULL, 0); // priority 3
+    xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 2 * 1024, NULL, 5, NULL, 1);       // priority 5
+    xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 2 * 1024, NULL, 3, NULL, 1); // priority 3
+    xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 2 * 1024, NULL, 5, NULL, 0);       // priority 5
+    xTaskCreatePinnedToCore(debugFrameTask, "debugFrameTask", 2 * 1024, NULL, 1, NULL, 1); // debug task with priority 1 on core 1
   }
 
 } // end setup
@@ -253,7 +258,7 @@ void TCPSendTask(void *pvParameters)
       for (byte i = 0; i < frameIn.len; i++)
         sBuffer[i + 5] = frameIn.data[i];
 
-      client.write(sBuffer, 13);
+      client.write(sBuffer, BUFFER_SIZE);
     }
   }
 }
@@ -268,7 +273,7 @@ void TCPReceiveTask(void *pvParameters)
   {
     if (client.connected() && client.available())
     {
-      if (client.readBytes(cBuffer, 13) == 13)
+      if (client.readBytes(cBuffer, BUFFER_SIZE) == BUFFER_SIZE)
         xQueueSend(tcpToCanQueue, cBuffer, 10);
     }
     vTaskDelay(10 / portTICK_PERIOD_MS); // Avoid busy-waiting
@@ -281,7 +286,7 @@ void TCPReceiveTask(void *pvParameters)
 
 void CANSendTask(void *pvParameters)
 {
-  byte buffer[13];
+  byte buffer[BUFFER_SIZE];
   while (true)
   {
     if (xQueueReceive(tcpToCanQueue, buffer, portMAX_DELAY))
@@ -322,7 +327,7 @@ void debugFrameTask(void *pvParameters)
 void debugFrame(const CANMessage *frame)
 {
   uint16_t hash = frame->id & 0xFFFF;
-  if (frame->id & 0xFFFF == rrHash)
+  if (hash == rrHash)
     Serial.println("TCP -> CAN");
   else
     Serial.println("CAN -> TCP");
@@ -330,13 +335,13 @@ void debugFrame(const CANMessage *frame)
   debug.println(hash, HEX);
   debug.print("Response : ");
   debug.println((frame->id & 0x10000) >> 16 ? "true" : "false");
-  debug.print("Commande : 0x");
+  debug.print("Command : 0x");
   debug.println((frame->id & 0x1FE0000) >> 17, HEX);
   for (byte i = 0; i < frame->len; i++)
   {
     debug.printf("data[%d] = 0x", i);
     debug.print(frame->data[i], HEX);
-    if (i < frame->len - 2)
+    if (i < frame->len - 1)
       debug.print(" - ");
   }
   debug.printf("\n");
