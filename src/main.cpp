@@ -1,3 +1,4 @@
+
 /*
    rocrail_CAN_TCP_GW
 
@@ -6,7 +7,7 @@
 */
 
 #define PROJECT "rocrail_can_tcp_gateway"
-#define VERSION "1.0.8"
+#define VERSION "1.2.1"
 #define AUTHOR "Christophe BOBILLE - www.locoduino.org"
 
 //----------------------------------------------------------------------------------------
@@ -23,7 +24,6 @@
 
 #include <ACAN_ESP32.h> // https://github.com/pierremolinaro/acan-esp32.git
 #include <Arduino.h>
-#include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -55,14 +55,38 @@ byte sBuffer[BUFFER_SIZE]; // Serial buffer
 uint16_t rrHash; // for Rocrail hash
 
 //----------------------------------------------------------------------------------------
-//  TCP/WIFI-ETHERNET
+//  Select a communication mode
 //----------------------------------------------------------------------------------------
+#define ETHERNET
+// #define WIFI
+
+IPAddress ip(192, 168, 1, 207);
+const uint port = 15731;
+
+//----------------------------------------------------------------------------------------
+//  Ethernet
+//----------------------------------------------------------------------------------------
+#if defined(ETHERNET)
+#include <Ethernet.h>
+#include <SPI.h>
+byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xEF};
+EthernetServer server(port);
+EthernetClient client;
+
+//----------------------------------------------------------------------------------------
+//  WIFI
+//----------------------------------------------------------------------------------------
+#elif defined(WIFI)
+#include <WiFi.h>
 
 const char *ssid = "**********";
 const char *password = "**********";
-const uint port = 15731;
+IPAddress gateway(192, 168, 1, 1);  // passerelle par défaut
+IPAddress subnet(255, 255, 255, 0); // masque de sous réseau
 WiFiServer server(port);
 WiFiClient client;
+
+#endif
 
 //----------------------------------------------------------------------------------------
 //  Queues
@@ -104,6 +128,14 @@ void setup()
   }
   delay(100);
 
+  debug.printf("\nProject   :    %s", PROJECT);
+  debug.printf("\nVersion   :    %s", VERSION);
+  debug.printf("\nAuteur    :    %s", AUTHOR);
+  debug.printf("\nFichier   :    %s", __FILE__);
+  debug.printf("\nCompiled  :    %s", __DATE__);
+  debug.printf(" - %s\n\n", __TIME__);
+  debug.printf("-----------------------------------\n\n");
+
   debug.println("Start setup");
 
   //--- Configure ESP32 CAN
@@ -111,34 +143,52 @@ void setup()
   ACAN_ESP32_Settings settings(DESIRED_BIT_RATE);
   settings.mDriverReceiveBufferSize = 50;
   settings.mDriverTransmitBufferSize = 50;
-  settings.mRxPin = GPIO_NUM_22; // Optional, default Tx pin is GPIO_NUM_4
-  settings.mTxPin = GPIO_NUM_23; // Optional, default Rx pin is GPIO_NUM_5
+  settings.mRxPin = GPIO_NUM_21; // Optional, default Tx pin is GPIO_NUM_4
+  settings.mTxPin = GPIO_NUM_22; // Optional, default Rx pin is GPIO_NUM_5
   const uint32_t errorCode = ACAN_ESP32::can.begin(settings);
 
   if (errorCode)
   {
-    debug.print("Configuration error 0x");
+    debug.print("Cƒonfiguration error 0x");
     debug.println(errorCode, HEX);
   }
   else
     debug.print("Configuration CAN OK\n\n");
 
+#if !defined(ETHERNET) && !defined(WIFI)
+  Serial.print("Select a communication mode.");
+  while (1)
+  {
+  }
+#endif
+
+#if defined(ETHERNET)
+  Serial.println("Waiting for Ethernet connection : ");
+  // Ethernet initialization
+  Ethernet.init(5); // MKR ETH Shield (change depending on your hardware)
+  Ethernet.begin(mac, ip);
+  server.begin();
+  Serial.print("IP address = ");
+  Serial.println(Ethernet.localIP());
+  Serial.printf("Port = %d\n", port);
+
+#elif defined(WIFI)
+  WiFi.config(ip, gateway, subnet);
   WiFi.begin(ssid, password);
-
-  debug.print("Waiting for WiFi connection : \n\n");
-
+  Serial.print("Waiting for WiFi connection : \n\n");
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
-    debug.print(".");
+    Serial.print(".");
   }
-
-  debug.println("");
-  debug.println("WiFi connected.");
-  debug.print("IP address : ");
-  debug.println(WiFi.localIP());
-
+  Serial.println("");
+  Serial.println("WiFi connected.");
+  Serial.print("IP address : ");
+  Serial.println(WiFi.localIP());
+  Serial.printf("Port = %d\n", port);
   server.begin();
+
+#endif
 
   debug.printf("\n\nWaiting for connection from Rocrail.\n");
 
@@ -146,7 +196,6 @@ void setup()
     client = server.available();
 
   // extract the Rocrail hash
-  debug.printf("New Client Rocrail : 0x");
   if (client.connected())
   {                 // loop while the client's connected
     int16_t rb = 0; //!\ Do not change type int16_t See https://www.arduino.cc/reference/en/language/functions/communication/stream/streamreadbytes/
@@ -156,6 +205,8 @@ void setup()
         rb = client.readBytes(cBuffer, BUFFER_SIZE);
     }
     rrHash = ((cBuffer[2] << 8) | cBuffer[3]);
+
+    debug.printf("New Client Rocrail : 0x");
     debug.println(rrHash, HEX);
 
     // --- register Rocrail on the CAN bus
