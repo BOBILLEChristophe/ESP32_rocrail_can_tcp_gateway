@@ -15,4 +15,6 @@
 
 Ethernet or WiFi option :
 
+<img src="include/ethernet_wifi_option.png" alt="ajout_loco" width="500">
+
 
