@@ -7,7 +7,7 @@
 */
 
 #define PROJECT "rocrail_can_tcp_gateway"
-#define VERSION "1.2.1"
+#define VERSION "1.3.1"
 #define AUTHOR "Christophe BOBILLE - www.locoduino.org"
 
 //----------------------------------------------------------------------------------------
@@ -57,10 +57,10 @@ uint16_t rrHash; // for Rocrail hash
 //----------------------------------------------------------------------------------------
 //  Select a communication mode
 //----------------------------------------------------------------------------------------
-#define ETHERNET
-// #define WIFI
+//#define ETHERNET
+#define WIFI
 
-IPAddress ip(192, 168, 1, 207);
+IPAddress ip(192, 168, 1, 210);
 const uint port = 15731;
 
 //----------------------------------------------------------------------------------------
@@ -79,6 +79,7 @@ EthernetClient client;
 #elif defined(WIFI)
 #include <WiFi.h>
 
+
 const char *ssid = "**********";
 const char *password = "**********";
 IPAddress gateway(192, 168, 1, 1);  // passerelle par défaut
@@ -89,12 +90,14 @@ WiFiClient client;
 #endif
 
 //----------------------------------------------------------------------------------------
-//  Queues
+//  Queues + mutex
 //----------------------------------------------------------------------------------------
 
 QueueHandle_t canToTcpQueue;
 QueueHandle_t tcpToCanQueue;
 QueueHandle_t debugQueue; // Queue for debug messages
+
+SemaphoreHandle_t tcpMutex;
 
 //----------------------------------------------------------------------------------------
 //  Debug declaration
@@ -110,6 +113,11 @@ void CANReceiveTask(void *pvParameters);
 void TCPSendTask(void *pvParameters);
 void TCPReceiveTask(void *pvParameters);
 void CANSendTask(void *pvParameters);
+#if defined(ETHERNET)
+void ethernetMonitorTask(void *pvParameters);
+#elif defined(WIFI)
+void wifiMonitorTask(void *pvParameters);
+#endif
 void debugFrameTask(void *pvParameters); // Debug task
 
 //----------------------------------------------------------------------------------------
@@ -143,8 +151,8 @@ void setup()
   ACAN_ESP32_Settings settings(DESIRED_BIT_RATE);
   settings.mDriverReceiveBufferSize = 50;
   settings.mDriverTransmitBufferSize = 50;
-  settings.mRxPin = GPIO_NUM_21; // Optional, default Tx pin is GPIO_NUM_4
-  settings.mTxPin = GPIO_NUM_22; // Optional, default Rx pin is GPIO_NUM_5
+  settings.mRxPin = GPIO_NUM_21; // Optional, default Rx pin is GPIO_NUM_5
+  settings.mTxPin = GPIO_NUM_22; // Optional, default Tx pin is GPIO_NUM_4
   const uint32_t errorCode = ACAN_ESP32::can.begin(settings);
 
   if (errorCode)
@@ -248,11 +256,18 @@ void setup()
     tcpToCanQueue = xQueueCreate(50, BUFFER_SIZE * sizeof(byte));
     debugQueue = xQueueCreate(50, sizeof(CANMessage)); // Create debug queue
 
+    tcpMutex = xSemaphoreCreateMutex();
+
     // Create tasks
-    xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 2 * 1024, NULL, 3, NULL, 0); // priority 3
-    xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 2 * 1024, NULL, 5, NULL, 1);       // priority 5
-    xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 2 * 1024, NULL, 3, NULL, 1); // priority 3
-    xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 2 * 1024, NULL, 5, NULL, 0);       // priority 5
+    xTaskCreatePinnedToCore(CANReceiveTask, "CANReceiveTask", 4 * 1024, NULL, 3, NULL, 0); // priority 3 on core 0
+    xTaskCreatePinnedToCore(TCPSendTask, "TCPSendTask", 4 * 1024, NULL, 5, NULL, 1);       // priority 5 on core 1
+    xTaskCreatePinnedToCore(TCPReceiveTask, "TCPReceiveTask", 4 * 1024, NULL, 3, NULL, 1); // priority 3 on core 1
+    xTaskCreatePinnedToCore(CANSendTask, "CANSendTask", 4 * 1024, NULL, 5, NULL, 0);       // priority 5 on core 0
+#if defined(ETHERNET)
+    xTaskCreatePinnedToCore(ethernetMonitorTask, "Ethernet Monitor", 4 * 1024, NULL, 1, NULL, 1); // priority 1 on core 1
+#elif defined(WIFI)
+    xTaskCreatePinnedToCore(wifiMonitorTask, "WiFi Monitor", 4 * 1024, NULL, 1, NULL, 1); // priority 1 on core 1
+#endif
     xTaskCreatePinnedToCore(debugFrameTask, "debugFrameTask", 2 * 1024, NULL, 1, NULL, 1); // debug task with priority 1 on core 1
   }
 
@@ -264,6 +279,7 @@ void setup()
 
 void loop()
 {
+  vTaskDelete(NULL);
 } // Nothing to do
 
 //----------------------------------------------------------------------------------------
@@ -355,6 +371,49 @@ void CANSendTask(void *pvParameters)
   }
 }
 
+#if defined(ETHERNET)
+
+//----------------------------------------------------------------------------------------
+//   ethernetMonitorTask
+//----------------------------------------------------------------------------------------
+
+void ethernetMonitorTask(void *parameter)
+{
+  while (true)
+  {
+    if (!client.connected())
+    {
+      debug.println("Connexion au serveur TCP perdue. Tentative de reconnexion...");
+      client = server.available();
+    }
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Vérifier toutes les 5 secondes
+  }
+}
+
+#elif defined(WIFI)
+
+//----------------------------------------------------------------------------------------
+//   wifiMonitorTask
+//----------------------------------------------------------------------------------------
+
+// Tâche pour surveiller la connexion WiFi et la reconnecter si nécessaire (Core 1)
+void wifiMonitorTask(void *parameter)
+{
+  while (true)
+  {
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      xSemaphoreTake(tcpMutex, portMAX_DELAY);
+      Serial.println("Connexion au WiFi perdue. Tentative de reconnexion...");
+      WiFi.begin(ssid, password);
+    }
+    xSemaphoreGive(tcpMutex);
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Vérifier toutes les 5 secondes
+  }
+}
+
+#endif
+
 //----------------------------------------------------------------------------------------
 //   debugFrameTask
 //----------------------------------------------------------------------------------------
@@ -388,6 +447,8 @@ void debugFrame(const CANMessage *frame)
   debug.println((frame->id & 0x10000) >> 16 ? "true" : "false");
   debug.print("Command : 0x");
   debug.println((frame->id & 0x1FE0000) >> 17, HEX);
+  debug.print("Length : 0x");
+  debug.println(frame->len, HEX);
   for (byte i = 0; i < frame->len; i++)
   {
     debug.printf("data[%d] = 0x", i);
