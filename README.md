@@ -12,3 +12,7 @@
 ![_DSC1517](https://github.com/user-attachments/assets/33c8b243-ef7a-48a3-8dcd-28b861a2b1b3)
 
 ![_DSC1515](https://github.com/user-attachments/assets/a59d2dff-415e-4079-83a0-ede4b75c0032)
+
+Ethernet or WiFi option :
+
+
